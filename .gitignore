@@ -5,10 +5,10 @@ sdkconfig.ci
 managed_components/
 dependencies.lock
 
-# ROS2 workspace artifacts (you'll have these soon)
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
+# ROS2 workspace artifacts
+ros2/build/
+ros2/install/
+ros2/log/
 
 # Editors
 .vscode/

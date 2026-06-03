@@ -14,6 +14,7 @@
 #include <sensor_msgs/msg/imu.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
+#include <micro_ros_utilities/string_utilities.h>
 
 #ifdef CONFIG_MICRO_ROS_ESP_XRCE_DDS_MIDDLEWARE
 #include <rmw_microros/rmw_microros.h>
@@ -32,6 +33,12 @@
 #define REG_ACCEL_CONFIG    0x1C
 #define REG_WHO_AM_I        0x75
 #define REG_ACCEL_XOUT_H    0x3B
+
+#define ACCEL_NOISE_DENSITY  3.923e-3f   // 400 μg/√Hz × 9.80665 m/s²/g
+#define GYRO_NOISE_DENSITY   8.727e-5f   // 0.005 °/s/√Hz × π/180
+#define SAMPLE_BANDWIDTH_HZ  50.0f
+#define ACCEL_VARIANCE  (ACCEL_NOISE_DENSITY * ACCEL_NOISE_DENSITY * SAMPLE_BANDWIDTH_HZ) // ~7.7e-4 (m/s²)²
+#define GYRO_VARIANCE   (GYRO_NOISE_DENSITY  * GYRO_NOISE_DENSITY  * SAMPLE_BANDWIDTH_HZ) // ~3.8e-7 (rad/s)²
 
 static const char* TAG = "IMU_Node";
 
@@ -138,32 +145,40 @@ void mpu_parse_data(mpu_data_t *mpu_dat, uint8_t *raw_buffer) {
     mpu_dat->gyro_z = (int16_t)((raw_buffer[12] << 8) | raw_buffer[13]) / 131.0 * (M_PI / 180.0);
 }
 
-// 
+// micro ros publishing
 void timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
     RCLC_UNUSED(last_call_time);
     if (timer == NULL) return;
+
+    uint8_t raw_buffer[14];
+    mpu_data_t data;
+
+    mpu_read_data(raw_buffer);
+    mpu_parse_data(&data, raw_buffer);
+
+    ESP_LOGI(TAG, "accel: %.2f %.2f %.2f | gyro: %.2f %.2f %.2f",
+        data.accel_x, data.accel_y, data.accel_z,
+        data.gyro_x, data.gyro_y, data.gyro_z);
     
     // Fill the message
     int64_t time_ns = rmw_uros_epoch_nanos();
     msg.header.stamp.sec = time_ns / 1000000000LL;
     msg.header.stamp.nanosec = time_ns % 1000000000LL;
     
-    msg.linear_acceleration.x = 0.0;
-    msg.linear_acceleration.y = 0.0;
-    msg.linear_acceleration.z = 9.81;
+    msg.linear_acceleration.x = data.accel_x;
+    msg.linear_acceleration.y = data.accel_y;
+    msg.linear_acceleration.z = data.accel_z;
     
-    msg.angular_velocity.x = 0.0;
-    msg.angular_velocity.y = 0.0;
-    msg.angular_velocity.z = 0.0;
-    
-    msg.orientation_covariance[0] = -1.0;
-    
+    msg.angular_velocity.x = data.gyro_x;
+    msg.angular_velocity.y = data.gyro_y;
+    msg.angular_velocity.z = data.gyro_z;
+
     // Publish once, at the end
     RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
 }
 
-//
+// micro ros publishing init
 void micro_ros_task(void * arg)
 {
 	rcl_allocator_t allocator = rcl_get_default_allocator();
@@ -182,6 +197,9 @@ void micro_ros_task(void * arg)
 
 	// create init_options
 	RCCHECK(rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator));
+    
+    // sync esp clock to agent (1000ms timeout)
+    RCCHECK(rmw_uros_sync_session(1000));
 
 	// create node
 	rcl_node_t node;
@@ -193,6 +211,17 @@ void micro_ros_task(void * arg)
 		&node,
 		ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
 		"imu/raw"));
+
+	msg.header.frame_id = micro_ros_string_utilities_init("imu_link");
+    msg.linear_acceleration_covariance[0] = ACCEL_VARIANCE;
+    msg.linear_acceleration_covariance[4] = ACCEL_VARIANCE;
+    msg.linear_acceleration_covariance[8] = ACCEL_VARIANCE;
+
+    msg.angular_velocity_covariance[0] = GYRO_VARIANCE;
+    msg.angular_velocity_covariance[4] = GYRO_VARIANCE;
+    msg.angular_velocity_covariance[8] = GYRO_VARIANCE;
+
+    msg.orientation_covariance[0] = -1.0;
 
 	// create timer,
 	rcl_timer_t timer;
@@ -223,10 +252,9 @@ void micro_ros_task(void * arg)
 
 
 void app_main(void) {
-    // Configure and create the I2C bus (Step 2)
-    // Add the MPU as a device (Step 3)
-    // Call mpu_init() (Step 5)
-    // For now, just log "MPU initialized" and exit — we'll add the read loop next
+    // Configure and create the I2C bus
+    // Add the MPU as a device
+    // Call mpu_init()
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus_handle));
 
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle));
@@ -246,23 +274,6 @@ void app_main(void) {
             5,
             NULL
     );
-
-    // static int counter = 0;
-    // while(1) {
-    //     uint8_t raw_buffer[14];
-    //     mpu_data_t data;
-
-    //     mpu_read_data(raw_buffer);
-    //     mpu_parse_data(&data, raw_buffer);
-
-    //     if (++counter % 10 == 0) {  // print at 10 Hz
-    //         ESP_LOGI(TAG, "accel: %.2f %.2f %.2f | gyro: %.2f %.2f %.2f",
-    //          data.accel_x, data.accel_y, data.accel_z,
-    //          data.gyro_x, data.gyro_y, data.gyro_z);
-    //     }
-    
-    //     vTaskDelay(pdMS_TO_TICKS(10));  // ~100 Hz
-    // }
 
     return;
 }
